@@ -11,6 +11,12 @@ from urllib.parse import urlencode
 
 # === CONFIGURATION ===
 BASE_URL = "https://bina.az/graphql"
+
+
+PROXY_URL = "http://spi8e1zees:HX83+0fdkrhNouutR4@az.decodo.com:30001" # <--- EDIT THIS LINE
+
+PROXIES = { "http": PROXY_URL, "https": PROXY_URL } if "YOUR_FULL_PASSWORD" not in PROXY_URL else {}
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; BinaScraper/1.0)",
     "Accept": "*/*",
@@ -33,9 +39,12 @@ HASHES = {
 # Use session for connection pooling
 SESSION = requests.Session()
 
+# === MODIFIED FUNCTION TO USE PROXY ===
 def graphql_request(operation_name: str, variables: dict, sha256: str) -> dict:
     HEADERS["X-APOLLO-OPERATION-NAME"] = operation_name
     extensions = {"persistedQuery": {"version": 1, "sha256Hash": sha256}}
+    
+    # The only change is adding the 'proxies' parameter and increasing the timeout
     resp = SESSION.get(
         BASE_URL,
         headers=HEADERS,
@@ -44,12 +53,13 @@ def graphql_request(operation_name: str, variables: dict, sha256: str) -> dict:
             "variables": json.dumps(variables),
             "extensions": json.dumps(extensions)
         },
-        timeout=30
+        proxies=PROXIES, # <--- THIS LINE ACTIVATES THE PROXY
+        timeout=45      # <--- Increased timeout is safer for proxies
     )
     resp.raise_for_status()
     return resp.json()
 
-# Fetch functions
+# Fetch functions (No changes needed, they use the modified graphql_request)
 
 def get_total_count(filter_params: dict) -> int:
     data = graphql_request("SearchTotalCount", {"filter": filter_params}, HASHES["count"])
@@ -65,7 +75,7 @@ def fetch_detail(item_id: str) -> dict:
     data = graphql_request("CurrentItem", {"id": item_id}, HASHES["detail"])
     return data.get("data", {}).get("item", {})
 
-# Parsers
+# Parsers (No changes needed)
 
 def parse_listing(item: dict) -> dict:
     loc = item.get("location") or {}
@@ -88,10 +98,8 @@ def parse_listing(item: dict) -> dict:
 
 
 def parse_detail_fields(item: dict) -> dict:
-    # Basic details
     phones = item.get("phones") or []
     phone_list = [p.get("value") for p in phones if p.get("value")]
-    # New requested fields
     category = item.get("category") or {}
     floor = item.get("floor")
     floors = item.get("floors")
@@ -99,24 +107,19 @@ def parse_detail_fields(item: dict) -> dict:
     has_repair = item.get("hasRepair", False)
 
     return {
-        # Existing fields
         "description":  item.get("description"),
         "address":      item.get("address"),
         "latitude":     item.get("latitude"),
         "longitude":    item.get("longitude"),
         "contact_name": item.get("contactName"),
         "phones":       ", ".join(phone_list),
-        # Category name (Yeni tikili, Köhnə tikili, etc.)
         "category":     category.get("name"),
-        # Deed available?  → Çıxarış
         "Çıxarış":      "Yes" if has_deed else "No",
-        # Renovation? → Təmir
         "Təmir":        "Yes" if has_repair else "No",
-        # Floor info → Mərtəbə
         "Mərtəbə":      f"{floor}/{floors}" if floor is not None and floors is not None else None,
     }
 
-# Combined fetch+parse detail
+# Combined fetch+parse detail (No changes needed)
 
 def fetch_and_parse_detail(item_meta: dict) -> dict:
     detail = fetch_detail(item_meta["id"])
@@ -127,8 +130,9 @@ def fetch_and_parse_detail(item_meta: dict) -> dict:
 # Global variable to store scraped data
 scraped_data = []
 
+# Save and Signal Handling (No changes needed)
+
 def save_data(data, reason="completed"):
-    """Save data to CSV file"""
     if not data:
         print(f"No data to save ({reason})")
         return
@@ -145,19 +149,28 @@ def save_data(data, reason="completed"):
     print(f"Data saved to {filename} ({len(data)} items, {reason})")
 
 def signal_handler(sig, frame):
-    """Handle Ctrl+C interrupt"""
     print('\nKeyboard interrupt received. Saving scraped data...')
     save_data(scraped_data, "interrupted")
     sys.exit(0)
 
-# Register the signal handler
 signal.signal(signal.SIGINT, signal_handler)
 
-# Main scraper
+# Main scraper (No changes needed, but will now use the proxy via graphql_request)
 def main():
     global scraped_data
+    
+    if not PROXIES:
+        print("!!! WARNING: Proxy is not configured. Running on your own IP. !!!")
+        print("!!! Edit the PROXY_URL variable to use a proxy. !!!")
+        
     filter_params = {}
-    total = get_total_count(filter_params)
+    try:
+        total = get_total_count(filter_params)
+    except Exception as e:
+        print(f"Failed to get total count. Your IP may be blocked or the proxy is not working.")
+        print(f"Error: {e}")
+        sys.exit(1)
+        
     limit = 24
     pages = math.ceil(total / limit)
     print(f"Total listings: {total}, pages: {pages}")
@@ -167,13 +180,23 @@ def main():
         for i in range(pages):
             offset = i * limit
             print(f"Batch {i+1}/{pages} (offset={offset})")
-            batch = fetch_batch(offset, limit)
+            
+            # This loop will stop if the page limit is hit
+            if i >= 47:
+                print("Stopping due to 47-page limit of this API endpoint.")
+                break
+                
+            try:
+                batch = fetch_batch(offset, limit)
+            except Exception as e:
+                print(f"Error fetching batch {i+1}: {e}. Skipping.")
+                continue
+
             if not batch:
+                print("Received empty batch. Ending scrape.")
                 break
 
-            # Parse metadata
             metas = [parse_listing(item) for item in batch]
-            # Parallel detail fetch + parse
             futures = [executor.submit(fetch_and_parse_detail, meta) for meta in metas]
             for future in as_completed(futures):
                 try:
@@ -183,7 +206,6 @@ def main():
 
             time.sleep(BATCH_DELAY)
 
-    # Save data normally when completed
     save_data(scraped_data, "completed")
 
 if __name__ == "__main__":
