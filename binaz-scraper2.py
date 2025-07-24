@@ -4,6 +4,8 @@ import time
 import math
 import csv
 import datetime
+import signal
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
 
@@ -122,15 +124,45 @@ def fetch_and_parse_detail(item_meta: dict) -> dict:
     item_meta.update(detail_parsed)
     return item_meta
 
+# Global variable to store scraped data
+scraped_data = []
+
+def save_data(data, reason="completed"):
+    """Save data to CSV file"""
+    if not data:
+        print(f"No data to save ({reason})")
+        return
+    
+    keys = data[0].keys()
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    filename = f"bina_listings_{date_str}.csv"
+    
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(data)
+    
+    print(f"Data saved to {filename} ({len(data)} items, {reason})")
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C interrupt"""
+    print('\nKeyboard interrupt received. Saving scraped data...')
+    save_data(scraped_data, "interrupted")
+    sys.exit(0)
+
+# Register the signal handler
+signal.signal(signal.SIGINT, signal_handler)
+
 # Main scraper
 def main():
+    global scraped_data
     filter_params = {}
     total = get_total_count(filter_params)
     limit = 24
     pages = math.ceil(total / limit)
     print(f"Total listings: {total}, pages: {pages}")
 
-    out_data = []
+    scraped_data = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         for i in range(pages):
             offset = i * limit
@@ -145,23 +177,14 @@ def main():
             futures = [executor.submit(fetch_and_parse_detail, meta) for meta in metas]
             for future in as_completed(futures):
                 try:
-                    out_data.append(future.result())
+                    scraped_data.append(future.result())
                 except Exception as e:
                     print(f"Detail fetch error: {e}")
 
             time.sleep(BATCH_DELAY)
 
-    # Write CSV
-    if out_data:
-        keys = out_data[0].keys()
-        date_str = datetime.datetime.now().strftime("%Y%m%d")
-        filename = f"bina_listings_{date_str}.csv"
-        with open(filename, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
-            writer.writeheader()
-            writer.writerows(out_data)
-
-    print(f"Done. Data saved to {filename}")
+    # Save data normally when completed
+    save_data(scraped_data, "completed")
 
 if __name__ == "__main__":
     main()
